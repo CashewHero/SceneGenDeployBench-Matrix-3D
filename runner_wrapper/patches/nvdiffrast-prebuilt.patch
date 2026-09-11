@@ -1,0 +1,12 @@
+--- a/nvdiffrast/torch/ops.py
++++ b/nvdiffrast/torch/ops.py
+@@ -19,6 +19,9 @@
+ _cached_plugin = {}
+ def _get_plugin(gl=False):
+     assert isinstance(gl, bool)
++    if not gl:
++        import nvdiffrast_plugin
++        return nvdiffrast_plugin
+ 
+     # Return cached plugin if already loaded.
+     if _cached_plugin.get(gl, None) is not None:

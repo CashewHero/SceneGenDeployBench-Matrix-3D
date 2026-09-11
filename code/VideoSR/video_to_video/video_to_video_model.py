@@ -1,4 +1,5 @@
 from typing import Any, Dict
+import os
 
 from diffusers import AutoencoderKLTemporalDecoder
 from einops import rearrange
@@ -31,7 +32,7 @@ class VideoToVideo:
         generator.eval()
 
         cfg.model_path = opt.model_path
-        load_dict = torch.load(cfg.model_path, map_location="cpu")
+        load_dict = torch.load(cfg.model_path, map_location="cpu", weights_only=False)
         if "state_dict" in load_dict:
             load_dict = load_dict["state_dict"]
         ret = generator.load_state_dict(load_dict, strict=True)
@@ -47,7 +48,7 @@ class VideoToVideo:
         logger.info("Build diffusion with GaussianDiffusion")
 
         vae = AutoencoderKLTemporalDecoder.from_pretrained(
-            "stabilityai/stable-video-diffusion-img2vid", subfolder="vae", variant="fp16"
+            os.environ.get("MATRIX3D_SVD_PATH", "stabilityai/stable-video-diffusion-img2vid"), subfolder="vae", variant="fp16"
         )
         vae.eval()
         vae.requires_grad_(False)

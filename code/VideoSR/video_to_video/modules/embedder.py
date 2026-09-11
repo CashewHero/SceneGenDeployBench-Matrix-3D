@@ -27,7 +27,7 @@ class FrozenOpenCLIPEmbedder(nn.Module):
     ):
         super().__init__()
         assert layer in self.LAYERS
-        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device("cpu"), pretrained=pretrained)
+        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device("cpu"), pretrained=os.environ.get("MATRIX3D_OPENCLIP_PATH", pretrained))
 
         del model.visual
         self.model = model

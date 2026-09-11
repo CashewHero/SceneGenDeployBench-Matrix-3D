@@ -56,12 +56,7 @@ runner_wrapper/localtest.sh build
 runner_wrapper/localtest.sh smoke
 ```
 
-The bundled test adapter waits by default. For a quick wrapper smoke test:
-
-```bash
-TEST_RUNNER_MIN_SECONDS=0 TEST_RUNNER_MAX_SECONDS=0 \
-  runner_wrapper/localtest.sh smoke
-```
+Model dependencies, required smoke input and runner-specific options are documented in [the Matrix-3D integration guide](../DEPLOYBENCH.md).
 
 ## Data Flow
 

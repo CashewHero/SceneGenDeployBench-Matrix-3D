@@ -5,6 +5,7 @@ from argparse import ArgumentParser, Namespace
 import glob
 import sys
 import os
+import subprocess
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 
 from easydict import EasyDict
@@ -214,7 +215,8 @@ def main():
     #resize first, please adjust resolution here if needed
     for ind, file_path in enumerate(file_path_list):
         print('file_path: ', file_path)
-        os.system('/ai-video-sh/haoxiang.guo/HoloTime/ffmpeg-7.0.2-amd64-static/ffmpeg -i {} -vf scale=960:480 {}'.format(file_path, file_path.replace('.mp4', '_resize.mp4')))
+        subprocess.run(["ffmpeg", "-y", "-i", file_path, "-vf", "scale=960:480",
+                        file_path.replace('.mp4', '_resize.mp4')], check=True)
     
     venhancer = VEnhancer(
         result_dir=save_dir,

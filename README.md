@@ -17,6 +17,10 @@
 
 
 
+## SceneGenDeployBench runner
+
+This repository includes a generator runner for full equirectangular `image` inputs and optimized `3dgs` outputs. Model selection, low-VRAM options, the catalog and local checks are documented in [DEPLOYBENCH.md](DEPLOYBENCH.md).
+
 ## 🌟 Introduction
 **Matrix-3D** utilizes panoramic representation for wide-coverage omnidirectional explorable 3D world generation that combines conditional video generation and panoramic 3D reconstruction.  
 - **Large-Scale Scene Generation** : Compared to existing scene generation approaches, Matrix-3D supports the generation of broader, more expansive scenes that allow for complete 360-degree free exploration.

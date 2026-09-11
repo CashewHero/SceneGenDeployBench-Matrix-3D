@@ -1,4 +1,5 @@
 __pycache__/
+.venv/
 checkpoints/flux_lora/
 checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/
 checkpoints/Wan-AI/Wan2.1-I2V-14B-720P/

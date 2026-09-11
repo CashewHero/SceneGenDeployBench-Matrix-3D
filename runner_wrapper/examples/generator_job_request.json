@@ -5,10 +5,11 @@
     "batch_id": "smoke-generation-batch-1",
     "job_type": "generation",
     "primary_sample": "sample-1",
+    "primary_sample_metadata": {"projection": "equirectangular", "fov": [360, 180]},
     "source_job_id": null,
     "attempt": 1,
-    "timeout_seconds": 3600,
-    "parameters": {}
+    "timeout_seconds": 43200,
+    "parameters": {"prompt": "a realistic indoor room", "seed": 42, "video_steps": 1, "gs_iterations": 1}
   },
   "inputs": {
     "data": {
@@ -18,6 +19,6 @@
     }
   },
   "runtime": {
-    "output_dir": "/data/output/my-generator@0.1.0/smoke-dataset/sample-1"
+    "output_dir": "/data/output/matrix3d-smoke/sample-1"
   }
 }

@@ -97,6 +97,11 @@ def generate_fit_data_new(args):
     pos = all_splitted_c2ws[:,:3,3]
     pos_mean = pos.mean(axis=0)
     pos_scale = np.linalg.norm(pos[-1] - pos[0]) / 10.
+    if not np.isfinite(pos_scale) or pos_scale <= 0:
+        raise ValueError("Cannot normalize a camera path with zero displacement")
+    # The runner needs the inverse transform to restore the primary viewpoint origin.
+    with open(os.path.join(output_dir, "normalization.json"), "w") as handle:
+        json.dump({"center": pos_mean.tolist(), "scale": float(pos_scale)}, handle)
 
     all_splitted_c2ws[:,:3,3] = (all_splitted_c2ws[:,:3,3] - pos_mean)/pos_scale
     all_splitted_Rts = np.linalg.inv(all_splitted_c2ws)

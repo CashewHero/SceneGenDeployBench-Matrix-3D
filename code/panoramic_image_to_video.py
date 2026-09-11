@@ -1,6 +1,8 @@
 # video generation
 import os
 import sys
+import subprocess
+import shutil
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 sys.path.append("./DiffSynth-Studio")
 from diffsynth import ModelManager, WanVideoPipeline
@@ -17,7 +19,6 @@ from einops import rearrange
 import torchvision
 import torch.distributed as dist
 from modelscope import snapshot_download
-from xfuser.core.distributed import init_distributed_environment, initialize_model_parallel
 from pathlib import Path
 import json
 # add 5b model support;
@@ -185,7 +186,8 @@ training_iters=3000 # optimization iterations
 num_of_point_cloud=3000000 # number of point cloud unprojected from depth map
 num_views_per_view=3 # inserted between adjacent camera poses
 img_sample_interval=1 # images selected during training to optimize 3DGS
-moge_ckpt_path = os.path.abspath("checkpoints/moge/model.pt")
+CHECKPOINT_ROOT = Path(os.environ.get("MATRIX3D_CHECKPOINT_DIR", "checkpoints")).absolute()
+moge_ckpt_path = str(CHECKPOINT_ROOT / "moge/model.pt")
 
 def simple_filename(prompt):
     filename = re.sub(r'[^\w\s-]', '', prompt)  
@@ -207,16 +209,11 @@ def main(args):
     )
     # Download models
     
-    from xfuser.core.distributed import (initialize_model_parallel,
-                                        init_distributed_environment)
-    init_distributed_environment(
-        rank=dist.get_rank(), world_size=dist.get_world_size())
-
-    initialize_model_parallel(
-        sequence_parallel_degree=dist.get_world_size(),
-        ring_degree=1,
-        ulysses_degree=dist.get_world_size(),
-    )
+    if dist.get_world_size() > 1:
+        from xfuser.core.distributed import initialize_model_parallel, init_distributed_environment
+        init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
+        initialize_model_parallel(sequence_parallel_degree=dist.get_world_size(),
+                                  ring_degree=1, ulysses_degree=dist.get_world_size())
 
     torch.cuda.set_device(dist.get_rank())
     
@@ -230,15 +227,20 @@ def main(args):
     movement_range = args.movement_range
     movement_mode = args.movement_mode
     seed = args.seed
+    frame_count = args.num_frames
+    inference_dtype = getattr(torch, args.inference_dtype)
     resolution = args.resolution
     is_720p = resolution == 720
 
-    if is_720p:
+    if use_5b_model and not is_720p:
+        raise ValueError("The 5B checkpoint only supports resolution=720")
+    skip_download = os.environ.get("MATRIX3D_SKIP_DOWNLOAD") == "1"
+    if is_720p and not skip_download:
         if not use_5b_model:
-            snapshot_download("Wan-AI/Wan2.1-I2V-14B-720P", local_dir="checkpoints/Wan-AI/Wan2.1-I2V-14B-720P")
+            snapshot_download("Wan-AI/Wan2.1-I2V-14B-720P", local_dir=str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-720P"))
         # download model only when not using the 5b model;
-    else:
-        snapshot_download("Wan-AI/Wan2.1-I2V-14B-480P", local_dir="checkpoints/Wan-AI/Wan2.1-I2V-14B-480P")
+    elif not is_720p and not skip_download:
+        snapshot_download("Wan-AI/Wan2.1-I2V-14B-480P", local_dir=str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-480P"))
     # do other things only in the main rank;
     device = f"cuda:{dist.get_rank()}"
     case_dir = os.path.abspath(output_dir)#os.path.abspath(os.path.join(output_dir, panorama_name))
@@ -249,7 +251,9 @@ def main(args):
     cv2.imwrite(input_image_path, panorama)
     if dist.get_rank() == 0:
         print("\n\nperform moge...\n\n")
-        os.system(f"cd code/MoGe && python scripts/infer_panorama.py --input {os.path.abspath(input_image_path)} --output {case_dir} --pretrained {moge_ckpt_path} --device {device} --threshold 0.03 --maps --ply")
+        subprocess.run([sys.executable, "scripts/infer_panorama.py", "--input", os.path.abspath(input_image_path),
+                        "--output", case_dir, "--pretrained", moge_ckpt_path, "--device", device,
+                        "--threshold", "0.03", "--maps", "--ply"], cwd="code/MoGe", check=True)
         depth_path = os.path.join(case_dir, "moge","depth.exr")
         mask_path = os.path.join(case_dir, "moge", "mask.png")
         print(f"{os.path.exists(mask_path)},{mask_path}")
@@ -266,7 +270,7 @@ def main(args):
             rail = load_rail(args.json_path)
         else:
             rail = None
-        rendered_rgb, rendered_mask, render_Rts, firstframe_rgb, firstframe_depth, angle = perform_camera_movement_with_cam_input(panorama_torch, depth_torch, angle=angle, movement_ratio=movement_range, frame_size=81, preset_rail=rail,mode=movement_mode)
+        rendered_rgb, rendered_mask, render_Rts, firstframe_rgb, firstframe_depth, angle = perform_camera_movement_with_cam_input(panorama_torch, depth_torch, angle=angle, movement_ratio=movement_range, frame_size=frame_count, preset_rail=rail,mode=movement_mode)
 
     condition_dir = os.path.join(case_dir,"condition")
     os.makedirs(condition_dir, exist_ok=True)
@@ -294,37 +298,31 @@ def main(args):
     # perform panovid generation;
     dist.barrier()
     if not use_5b_model:
-        model_manager = ModelManager(torch_dtype=torch.bfloat16, device="cpu")
+        model_manager = ModelManager(torch_dtype=inference_dtype, device="cpu")
         if is_720p:
             model_manager.load_models(
-                ["./checkpoints/Wan-AI/Wan2.1-I2V-14B-720P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"],
+                [str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-720P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")],
                 torch_dtype=torch.float32, # Image Encoder is loaded with float32
             ) 
-            BASE_DIR = Path(__file__).parent.absolute()
-            BASE_DIR=BASE_DIR.parent
-
             model_manager.load_models([
-                [str(BASE_DIR / f"checkpoints/Wan-AI/Wan2.1-I2V-14B-720P/diffusion_pytorch_model-0000{i}-of-00007.safetensors") for i in range(1, 8)],
-                str(BASE_DIR / "checkpoints/Wan-AI/Wan2.1-I2V-14B-720P/models_t5_umt5-xxl-enc-bf16.pth"),
-                str(BASE_DIR / "checkpoints/Wan-AI/Wan2.1-I2V-14B-720P/Wan2.1_VAE.pth")
+                [str(CHECKPOINT_ROOT / f"Wan-AI/Wan2.1-I2V-14B-720P/diffusion_pytorch_model-0000{i}-of-00007.safetensors") for i in range(1, 8)],
+                str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-720P/models_t5_umt5-xxl-enc-bf16.pth"),
+                str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-720P/Wan2.1_VAE.pth")
             ])
 
-            model_manager.load_lora("./checkpoints/Wan-AI/wan_lora/pano_video_gen_720p.bin", lora_alpha=1.0)
+            model_manager.load_lora(str(CHECKPOINT_ROOT / "Wan-AI/wan_lora/pano_video_gen_720p.bin"), lora_alpha=1.0)
         else:
             model_manager.load_models(
-                ["./checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"],
+                [str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")],
                 torch_dtype=torch.float32, # Image Encoder is loaded with float32
             ) 
-            BASE_DIR = Path(__file__).parent.absolute()
-            BASE_DIR=BASE_DIR.parent
-
             model_manager.load_models([
-                [str(BASE_DIR / f"checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-0000{i}-of-00007.safetensors") for i in range(1, 8)],
-                str(BASE_DIR / "checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth"),
-                str(BASE_DIR / "checkpoints/Wan-AI/Wan2.1-I2V-14B-480P/Wan2.1_VAE.pth")
+                [str(CHECKPOINT_ROOT / f"Wan-AI/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-0000{i}-of-00007.safetensors") for i in range(1, 8)],
+                str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-480P/models_t5_umt5-xxl-enc-bf16.pth"),
+                str(CHECKPOINT_ROOT / "Wan-AI/Wan2.1-I2V-14B-480P/Wan2.1_VAE.pth")
             ])
 
-            model_manager.load_lora("./checkpoints/Wan-AI/wan_lora/pano_video_gen_480p.ckpt", lora_alpha=1.0)
+            model_manager.load_lora(str(CHECKPOINT_ROOT / "Wan-AI/wan_lora/pano_video_gen_480p.ckpt"), lora_alpha=1.0)
 
         pipe = WanVideoPipeline.from_model_manager(model_manager, device=f"cuda:{dist.get_rank()}",use_usp=True if dist.get_world_size() > 1 else False)
         if args.enable_vram_management:
@@ -333,16 +331,18 @@ def main(args):
             pipe.enable_vram_management(num_persistent_param_in_dit=None)
     else:
         pipe = WanVideoPipelineNew.from_pretrained(
-            torch_dtype=torch.bfloat16,
+            torch_dtype=inference_dtype,
             device="cuda",
             model_configs=[
-                ModelConfig(local_model_path="./checkpoints", model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                ModelConfig(local_model_path="./checkpoints", model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                ModelConfig(local_model_path="./checkpoints", model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth", offload_device="cpu"),
+                ModelConfig(local_model_path=str(CHECKPOINT_ROOT), model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu", skip_download=skip_download),
+                ModelConfig(local_model_path=str(CHECKPOINT_ROOT), model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu", skip_download=skip_download),
+                ModelConfig(local_model_path=str(CHECKPOINT_ROOT), model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth", offload_device="cpu", skip_download=skip_download),
             ],
+            tokenizer_config=ModelConfig(local_model_path=str(CHECKPOINT_ROOT), model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="google/umt5-xxl/", skip_download=skip_download),
+            redirect_common_files=False,
             use_usp=True if dist.get_world_size() > 1 else False
         )
-        lora_checkpoint = os.path.abspath("./checkpoints/Wan-AI/wan-lora/pano_video_gen_720p_5b.safetensors")
+        lora_checkpoint = str(CHECKPOINT_ROOT / "Wan-AI/wan_lora/pano_video_gen_720p_5b.safetensors")
         model = add_lora_to_model(
             getattr(pipe, "dit"),
             "q,k,v,o,ffn.0,ffn.2".split(","),
@@ -374,7 +374,7 @@ def main(args):
             negative_prompt="The video is not of a high quality, it has a low resolution. Distortion. strange artifacts.",
             cfg_scale=5.0,
             num_frames=81,
-            num_inference_steps=50,
+            num_inference_steps=args.num_inference_steps,
             seed=seed, tiled=True,
             height=tgt_resolution[1],
             width=tgt_resolution[0],
@@ -382,7 +382,7 @@ def main(args):
             cond_mask = cond_mask
         )
     else:
-        tgt_resolution = (1408,704)
+        tgt_resolution = (args.width or 1408, args.height or 704)
         height = tgt_resolution[1]
         width = tgt_resolution[0]
         # TODO: add no-csv input support;
@@ -397,7 +397,7 @@ def main(args):
         dset = VideoDataset(
             #base_path="/", metadata_path="/datasets_3d/zhongqi.yang/matrix3d_inference/dataset/metadata_1k.csv",
             base_path="/", metadata_path=None,
-            num_frames=81,
+            num_frames=frame_count,
             time_division_factor=4, time_division_remainder=1,
             max_pixels=height*width, height=height, width=width,
             height_division_factor=16, width_division_factor=16,
@@ -413,15 +413,18 @@ def main(args):
         video_ori = pipe(
             prompt=cases['prompt'] + " The video is of high quality, and the view is very clear. High quality, masterpiece, best quality, highres, ultra-detailed, fantastic.",
             negative_prompt="The video is not of a high quality, it has a low resolution. Distortion. strange artifacts. flickering. worst quality. low quality",
-            seed=120, tiled=True,
+            seed=seed, tiled=True,
+            num_inference_steps=args.num_inference_steps,
             height=height, width=width,
             input_image=cases["video"][0],
-            num_frames=81,
+            num_frames=frame_count,
             cond_video = (cases["cond_video"]),
             cond_mask = (cases["cond_mask"]),
         )
-        # the original resolution of 5b model is actually [704,1408], in order to be unified with latter steps, we resize the output to [720,1440].
-        video = [img.resize((1440,720)) for img in video_ori]
+        # Production uses 1440x720 for the reconstruction stages. Explicit test
+        # dimensions remain small to make a plumbing run possible on Turing.
+        output_resolution = tgt_resolution if args.width is not None else (1440, 720)
+        video = [img.resize(output_resolution) for img in video_ori]
 
     if dist.get_rank() == 0:
         generated_dir = os.path.join(case_dir,"generated")
@@ -429,7 +432,7 @@ def main(args):
         
         os.makedirs(generated_dir, exist_ok=True)
         result = []
-        for j in range(81):
+        for j in range(frame_count):
             generated_image = np.array(video[j])[:,:,::-1]
             result.append(generated_image)
         write_video(result, generated_path, 24)
@@ -438,7 +441,7 @@ def main(args):
         gathered_video_name = f"pano_video.mp4"
         all_output_dir = case_dir
         os.makedirs(all_output_dir, exist_ok=True)
-        os.system(f"cp {generated_path} {os.path.join(all_output_dir, gathered_video_name)}")
+        shutil.copyfile(generated_path, os.path.join(all_output_dir, gathered_video_name))
         all_cameras_list = render_Rts.cpu().numpy().tolist()
 
         pano_camera_path = os.path.join(all_output_dir, "pano_video_cam.json")
@@ -454,9 +457,20 @@ if __name__ == "__main__":
     parser.add_argument("--movement_mode", type=str, default="straight", help="the shape of the rail along which the camera moves. choose between ['s_curve','l_curve','r_curve','straight']")
     parser.add_argument("--json_path", type=str, default="", help="predefined camera path. the predefined camera is stored as json file in the format defined in code/generate_example_camera.py")#######2025-6-13
     parser.add_argument("--seed", type=int, default=0, help="the generation seed")
-    parser.add_argument("--resolution", type=int, default=720, help="the working resolution of the panoramic video generation model.")
+    parser.add_argument("--resolution", type=int, choices=[480, 720], default=720, help="the working resolution of the panoramic video generation model.")
+    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_frames", type=int, default=81)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--inference_dtype", choices=["bfloat16", "float16"], default="bfloat16")
     parser.add_argument("--inout_dir", type=str, default="./output/example1")
     parser.add_argument("--use_5b_model", action="store_true", help="whether to use 5b model to train things.")
     parser.add_argument("--enable_vram_management", action="store_true", help="whether to enable vram management for running on low mem devices.")
     args = parser.parse_args()
+    if args.num_frames < 5 or args.num_frames % 4 != 1:
+        parser.error("--num_frames must be at least 5 and equal to 1 modulo 4")
+    if (args.width is None) != (args.height is None):
+        parser.error("--width and --height must be set together")
+    if args.width is not None and (args.width <= 0 or args.height <= 0 or args.width % 16 or args.height % 16):
+        parser.error("--width and --height must be positive and divisible by 16")
     main(args)

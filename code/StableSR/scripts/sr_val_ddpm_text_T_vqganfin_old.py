@@ -204,6 +204,7 @@ def main():
 		help="Color fix type to adjust the color of HR result according to LR input: adain (used in paper); wavelet; nofix",
 	)
 
+	parser.add_argument("--vqgan_config", default="configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
 	opt = parser.parse_args()
 	device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -216,7 +217,7 @@ def main():
 		print('No color correction')
 	print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 
-	vqgan_config = OmegaConf.load("configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
+	vqgan_config = OmegaConf.load(opt.vqgan_config)
 	vq_model = load_model_from_config(vqgan_config, opt.vqgan_ckpt)
 	vq_model = vq_model.to(device)
 	vq_model.decoder.fusion_w = opt.dec_w

@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = "1"
 sys.path.append("code/MoGe")
 sys.path.append("code")
@@ -121,7 +122,10 @@ def main(args):
             input_image_path = os.path.join(moge_output_dir, "input.png")
             cv2.imwrite(input_image_path, cv2.resize(cur_frame,(width,height)))
             print(width, height)
-            os.system(f"cd code/MoGe && python scripts/infer_panorama.py --input {input_image_path} --output {moge_output_dir} --pretrained {moge_model_path} --device {device} --threshold 0.03 --maps --ply --resolution_level 6")
+            subprocess.run([sys.executable, "scripts/infer_panorama.py", "--input", input_image_path,
+                            "--output", moge_output_dir, "--pretrained", moge_model_path, "--device", device,
+                            "--threshold", "0.03", "--maps", "--ply", "--resolution_level", "6"],
+                           cwd="code/MoGe", check=True)
             print(f"moge_output_dir={moge_output_dir}")
             depth_dir = os.path.join(moge_output_dir, "input")
             cur_depth = cv2.imread(os.path.join(depth_dir, "depth.exr"), cv2.IMREAD_ANYCOLOR|cv2.IMREAD_ANYDEPTH)
@@ -192,7 +196,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-            
-
-    
-    
